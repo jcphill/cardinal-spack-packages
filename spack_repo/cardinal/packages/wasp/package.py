@@ -27,6 +27,11 @@ class Wasp(CMakePackage):
     #   git -C <moose-checkout> ls-tree HEAD framework/contrib/wasp
     version("2025-08-25", commit="ce25dcde73ba81c70c330204ea5bf856762b95ac", submodules=True)
 
+    # WASP itself is C++-only, but its bundled TriBITS build system
+    # unconditionally calls CMake's enable_language(C) too, so a C
+    # compiler-wrapper environment has to be set up as well or CMake's
+    # compiler sanity check fails outright.
+    depends_on("c", type="build")
     depends_on("cxx", type="build")
     depends_on("cmake@3.20:", type="build")
 
