@@ -1,0 +1,12 @@
+diff --git a/waspcore/utils.h b/waspcore/utils.h
+index 971ec60..1202626 100644
+--- a/waspcore/utils.h
++++ b/waspcore/utils.h
+@@ -1,6 +1,7 @@
+ #ifndef WASP_UTILS_H
+ #define WASP_UTILS_H
+ #include "waspcore/wasp_bug.h"
++#include <sys/stat.h>
+ #include <algorithm>
+ #include <cmath>
+ #include <cstdlib>

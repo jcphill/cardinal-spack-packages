@@ -1,0 +1,15 @@
+--- a/contrib/moose/framework/src/userobjects/SolutionUserObjectBase.C	2026-10-09 15:48:45.944779118 -0500
++++ b/contrib/moose/framework/src/userobjects/SolutionUserObjectBase.C	2026-10-09 15:48:45.948779088 -0500
+@@ -1327,8 +1327,10 @@
+ SolutionUserObjectBase::readBlockIdMapFromExodusII()
+ {
+ #ifdef LIBMESH_HAVE_EXODUS_API
+-  const auto * exio_helper = (_file_type == "exodusII") ? &_exodusII_io->get_exio_helper()
+-                                                        : &_nemesis_io->get_nemio_helper();
++  if (_file_type != "exodusII")
++    mooseError("Reading the block ID map from a Nemesis-format file is not supported in this "
++               "build of libMesh (built without Nemesis support).");
++  const auto * exio_helper = &_exodusII_io->get_exio_helper();
+   const auto & id_to_block = exio_helper->id_to_block_names;
+   _block_name_to_id.clear();
+   _block_id_to_name.clear();

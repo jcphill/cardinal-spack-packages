@@ -1,0 +1,10 @@
+--- a/config/nekrs.mk
++++ b/config/nekrs.mk
+@@ -26,6 +26,7 @@
+ 	-DOCCA_ENABLE_HIP="$(OCCA_HIP_ENABLED)" \
+ 	-DOCCA_ENABLE_DPCPP="$(OCCA_DPCPP_ENABLED)" \
+ 	-DENABLE_AMGX="$(AMGX_ENABLED)" \
++	-DENABLE_HYPRE_GPU=0 \
+ 	$(NEKRS_DIR)
+ 
+ build_nekrs: | $(NEKRS_BUILDDIR)/Makefile

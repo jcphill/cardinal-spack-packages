@@ -1,0 +1,49 @@
+--- a/contrib/moose/framework/src/userobjects/SolutionUserObjectBase.C	2026-10-09 16:49:48.989701741 -0500
++++ b/contrib/moose/framework/src/userobjects/SolutionUserObjectBase.C	2026-10-09 16:49:49.011701591 -0500
+@@ -404,10 +404,9 @@
+       copy_solutions(*_exodusII_io, *_system2, _exodus_index2 + 1);
+     }
+     else
+-    {
+-      copy_solutions(*_nemesis_io, *_system, _exodus_index1 + 1);
+-      copy_solutions(*_nemesis_io, *_system2, _exodus_index2 + 1);
+-    }
++      mooseError(
++          "Copying solutions from a Nemesis-format file is not supported in this build of "
++          "libMesh (built without Nemesis support).");
+ 
+     // Update the systems
+     _system->update();
+@@ -430,7 +429,9 @@
+     if (_file_type == "exodusII")
+       copy_solutions(*_exodusII_io, *_system, _exodus_time_index);
+     else
+-      copy_solutions(*_nemesis_io, *_system, _exodus_time_index);
++      mooseError(
++          "Copying solutions from a Nemesis-format file is not supported in this build of "
++          "libMesh (built without Nemesis support).");
+ 
+     // Update the equations systems
+     _system->update();
+@@ -671,7 +672,9 @@
+       if (_file_type == "exodusII")
+         update_solutions(*_exodusII_io, *_system, _exodus_index1 + 1);
+       else
+-        update_solutions(*_nemesis_io, *_system, _exodus_index1 + 1);
++        mooseError(
++            "Copying solutions from a Nemesis-format file is not supported in this build of "
++            "libMesh (built without Nemesis support).");
+ 
+       _system->update();
+       _es->update();
+@@ -680,7 +683,9 @@
+       if (_file_type == "exodusII")
+         update_solutions(*_exodusII_io, *_system2, _exodus_index2 + 1);
+       else
+-        update_solutions(*_nemesis_io, *_system2, _exodus_index2 + 1);
++        mooseError(
++            "Copying solutions from a Nemesis-format file is not supported in this build of "
++            "libMesh (built without Nemesis support).");
+ 
+       _system2->update();
+       _es2->update();
