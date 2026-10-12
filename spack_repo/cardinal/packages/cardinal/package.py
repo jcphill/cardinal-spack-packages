@@ -139,6 +139,22 @@ class Cardinal(MakefilePackage, CudaPackage, ROCmPackage):
     depends_on("cxx", type="build")
     depends_on("fortran", type="build")
 
+    # MOOSE's framework/contrib/hit Python bindings are a pre-generated
+    # Cython .cpp file; moose.mk compiles it against whatever "python3-config"
+    # resolves first on PATH, with no Spack dependency of its own to pin
+    # that down. A system default below Python 3.8 (what the bundled
+    # Cython output itself requires) fails to compile outright, so this
+    # package needs its own known-good Python pulled in and put ahead of
+    # it on PATH (see setup_build_environment below).
+    depends_on("python@3.8:", type="build")
+    # moose.mk's MooseRevision.h generation step (scripts/get_repo_revision.py)
+    # imports this unconditionally on Python 3.7+ and is not allowed to fail
+    # silently (unlike scripts/premake.py's own optional pyyaml import,
+    # which moose.mk explicitly ignores failures from). depends_on (rather
+    # than relying on whatever's already on the chosen Python's path) makes
+    # it an extension of the same Python selected above.
+    depends_on("py-packaging", type="build")
+
     depends_on("mpi")
     depends_on("petsc+mpi+hypre+mumps+metis+hdf5", type="link")
     # +hl: OpenMC's CMake asks FindHDF5 for the HL component; without it
@@ -224,6 +240,13 @@ class Cardinal(MakefilePackage, CudaPackage, ROCmPackage):
         if spec.satisfies("+openmc"):
             env.set("FMT_DIR", spec["fmt"].prefix)
             env.set("PUGI_DIR", spec["pugixml"].prefix)
+
+        # Spack doesn't put a type="build" python dependency's bin/ on PATH
+        # automatically (that only happens for packages that *extend*
+        # python); do it explicitly so moose.mk's "python3-config" (see the
+        # depends_on above) finds this Python ahead of whatever the system
+        # provides.
+        env.prepend_path("PATH", spec["python"].prefix.bin)
 
         jobs = str(make_jobs)
         env.set("LIBMESH_JOBS", jobs)
