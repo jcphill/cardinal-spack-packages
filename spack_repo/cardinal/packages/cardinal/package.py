@@ -103,7 +103,14 @@ class Cardinal(MakefilePackage, CudaPackage, ROCmPackage):
         description="Install ENDF/B-VII.1 HDF5 data and set OPENMC_CROSS_SECTIONS",
         when="+openmc",
     )
-    variant("tests", default=False, description="Fetch test data needed by run_tests")
+    variant(
+        "tests",
+        default=False,
+        description=(
+            "Build cardinal-unit and cache run_tests/TestHarness/the nek_ci "
+            "regression-test data for use with `spack test run`"
+        ),
+    )
 
     # "cuda"/"cuda_arch" come from the CudaPackage mixin. cuda_arch doesn't
     # need to be set: NekRS's OCCA layer JIT-compiles each kernel at
@@ -147,6 +154,47 @@ class Cardinal(MakefilePackage, CudaPackage, ROCmPackage):
     # package needs its own known-good Python pulled in and put ahead of
     # it on PATH (see setup_build_environment below).
     depends_on("python@3.8:", type="build")
+    # The cached run_tests/TestHarness copy (see "+tests" below) needs a
+    # real interpreter on PATH during `spack test run`: TestHarness's own
+    # "hit" and "_pycapabilities" extensions are Python-version-specific
+    # compiled .so files assembled by "make install_python" against this
+    # same Python, and plain "#!/usr/bin/env python" would otherwise
+    # silently fall back to whatever (likely much older, ABI-incompatible)
+    # "python" the system happens to have -- confirmed by a real failure:
+    # "undefined symbol: Py_Version" importing hit.so under system Python
+    # 3.9 when this wasn't declared. type="run" (rather than "test") is
+    # required here even though this is purely a *testing* concern: Spack's
+    # solver only includes type="test" dependency edges in the concretized
+    # DAG when the spec is concretized with --test=root/--test=all
+    # (confirmed in spack/solver/asp.py's package_dependencies_rules(),
+    # which masks dt.TEST out of every dependency's depflag unless
+    # self.tests is truthy) -- a plain `spack install cardinal +tests`
+    # would silently drop a type="test" edge entirely, and `spack test run`
+    # only ever operates on the already-concretized, already-installed
+    # spec's fixed DAG, so there would be no later opportunity to add it.
+    # type="run" is a normal, always-concretized edge, gated to only
+    # +tests installs so it doesn't affect `spack load cardinal`'s
+    # environment for everyone who doesn't need it.
+    depends_on("python@3.8:", type="run", when="+tests")
+    # TestHarness's scheduler/runner machinery (TestHarness/schedulers/Job.py
+    # -> TestHarness/validation/__init__.py -> .../cases/validationcase.py)
+    # unconditionally imports numpy just to load the Job/Scheduler classes --
+    # not an optional feature, since the plugin loader (FactorySystem's
+    # Factory.loadPlugins) silently swallows the resulting ImportError and
+    # simply never registers "RunLocal", so run_tests fails indirectly with
+    # a confusing "KeyError: 'RunLocal'" rather than an obvious missing-
+    # module error. Confirmed by a real failure under this package's cached
+    # TestHarness copy (no numpy anywhere in the "install_python" output,
+    # since it's a vendored Python-only copy with no pip packages).
+    depends_on("py-numpy", type="run", when="+tests")
+    # Same silent-swallow failure mode as numpy above, one level deeper:
+    # TestHarness/validation/cases/csvvalidationcase.py unconditionally
+    # imports pandas, and it's reached from the same Tester.py ->
+    # TestHarness.validation import chain that every "tester" plugin goes
+    # through, so a missing pandas took out the entire plugin set again
+    # (confirmed by a real failure: every tester/scheduler plugin failed
+    # to import with "ModuleNotFoundError: No module named 'pandas'").
+    depends_on("py-pandas", type="run", when="+tests")
     # moose.mk's MooseRevision.h generation step (scripts/get_repo_revision.py)
     # imports this unconditionally on Python 3.7+ and is not allowed to fail
     # silently (unlike scripts/premake.py's own optional pyyaml import,
@@ -302,18 +350,54 @@ class Cardinal(MakefilePackage, CudaPackage, ROCmPackage):
         env.prepend_path("LD_RUN_PATH", hip_prefix.lib)
         env.prepend_path("LD_LIBRARY_PATH", hip_prefix.lib)
 
+    # Relative to self.stage.source_path -- both the "install_python" target
+    # below (which takes PREFIX as a plain make variable, resolved against
+    # the current working directory) and cache_extra_test_sources (which
+    # only ever copies paths relative to the staged source root) need this
+    # to stay a relative path.
+    _test_python_prefix = "spack-test-python"
+
     def _enable(self, variant):
         return "yes" if self.spec.satisfies(f"+{variant}") else "no"
 
-    def build(self, spec, prefix):
-        make(
+    def _make_flags(self):
+        spec = self.spec
+        return [
             f"ENABLE_OPENMC={self._enable('openmc')}",
             f"ENABLE_NEK={self._enable('nek')}",
             f"ENABLE_DAGMC={self._enable('dagmc')}",
             f"ENABLE_DOUBLE_DOWN={self._enable('double_down')}",
             f"OCCA_CUDA_ENABLED={'1' if spec.satisfies('+cuda') else '0'}",
             f"OCCA_HIP_ENABLED={'1' if spec.satisfies('+rocm') else '0'}",
-        )
+        ]
+
+    def build(self, spec, prefix):
+        make(*self._make_flags())
+
+        if spec.satisfies("+tests"):
+            # cardinal-unit: a real, separate GoogleTest-based unit test
+            # suite (unit/src/*Test.C), built as its own small executable
+            # via its own Makefile -- entirely independent of run_tests/
+            # TestHarness below, which only ever drives the main
+            # cardinal-opt binary against input files. This only compiles
+            # the handful of files under unit/src against the
+            # already-built MOOSE/Cardinal libraries, so it's cheap
+            # relative to the main build.
+            with working_dir(join_path(self.stage.source_path, "unit")):
+                make(*self._make_flags())
+
+            # MOOSE's own "install_python" target is what actually knows
+            # how to assemble a relocatable copy of python/ (TestHarness
+            # and the modules it imports -- FactorySystem, pyhit,
+            # mooseutils, pycapabilities) plus the two compiled Python
+            # extension modules those depend on (framework/contrib/hit's
+            # "hit" Cython module, pycapabilities' "_pycapabilities"),
+            # which otherwise only exist inside the build tree and aren't
+            # anywhere TestHarness's own sys.path manipulation would find
+            # them once the stage is gone. Reusing this target (rather
+            # than hand-copying an individual subset of python/) avoids
+            # silently missing one of those compiled extensions.
+            make(*self._make_flags(), "install_python", f"PREFIX={self._test_python_prefix}")
 
     def install(self, spec, prefix):
         # Cardinal has no `make install` target (OpenMC/NekRS/etc. are
@@ -342,6 +426,14 @@ class Cardinal(MakefilePackage, CudaPackage, ROCmPackage):
         dbg = join_path(self.stage.source_path, "cardinal-dbg")
         if os.path.exists(dbg):
             binaries.append(dbg)
+        # unit/'s own Makefile (APPLICATION_NAME := cardinal-unit) follows
+        # the same MOOSE METHOD-suffix convention as the main cardinal-opt
+        # build, so under the default METHOD=opt it links "cardinal-unit-opt",
+        # not the bare "cardinal-unit" -- confirmed directly in a real build
+        # log ("Linking Executable .../unit/cardinal-unit-opt").
+        unit_binary = join_path(self.stage.source_path, "unit", "cardinal-unit-opt")
+        if spec.satisfies("+tests") and os.path.exists(unit_binary):
+            binaries.append(unit_binary)
 
         ldd = which("ldd", required=True)
         cp = which("cp", required=True)
@@ -391,6 +483,24 @@ class Cardinal(MakefilePackage, CudaPackage, ROCmPackage):
                         dest_dir = join_path(prefix.share, name)
                         mkdirp(dest_dir)
                         cp("-a", data_dir, dest_dir)
+
+        if spec.satisfies("+tests"):
+            # Stash everything `spack test run cardinal` needs once the
+            # build stage is gone: the run_tests driver script, the
+            # testroot file it walks upward to find (identifies the app
+            # name/available capabilities), the nek_ci regression-test
+            # data fetched by the submodules() callback above, and the
+            # relocatable TestHarness copy assembled by "install_python"
+            # in build() above.
+            cache_extra_test_sources(
+                self,
+                [
+                    "testroot",
+                    "run_tests",
+                    join_path("test", "tests", "nek_ci"),
+                    join_path(self._test_python_prefix, "share", "moose"),
+                ],
+            )
 
     def setup_run_environment(self, env):
         if self.spec.satisfies("+nek"):
@@ -493,3 +603,31 @@ class Cardinal(MakefilePackage, CudaPackage, ROCmPackage):
                     "CMake) found a different HDF5 via its own search path "
                     "instead of the one HDF5_ROOT/CMAKE_PREFIX_PATH point at."
                 )
+
+    def test_unit(self):
+        """run cardinal-unit's GoogleTest suite"""
+        if not self.spec.satisfies("+tests"):
+            raise SkipTest("cardinal must be installed with +tests")
+        exe = which(join_path(self.prefix.bin, "cardinal-unit-opt"), required=True)
+        exe()
+
+    def test_run_tests(self):
+        """run the cached nek_ci regression tests through MOOSE's TestHarness"""
+        if not self.spec.satisfies("+tests"):
+            raise SkipTest("cardinal must be installed with +tests")
+
+        # run_tests (see its own source) resolves MOOSE_DIR from this env
+        # var when set, bypassing its usual auto-detection (which assumes
+        # it's sitting next to a full contrib/moose checkout -- not true of
+        # this cache, which only has the relocatable "install_python" copy
+        # of contrib/moose/python). TestHarness itself finds cardinal-opt
+        # via a plain PATH search (its own getExecutable()), which
+        # setup_run_environment already arranges for during `spack test run`.
+        cache_dir = self.test_suite.current_test_cache_dir
+        moose_dir = join_path(cache_dir, self._test_python_prefix, "share", "moose")
+        run_tests = which(join_path(cache_dir, "run_tests"), required=True)
+
+        with working_dir(join_path(cache_dir, "test", "tests", "nek_ci")):
+            run_tests(
+                "-j", str(make_jobs), extra_env={"MOOSE_DIR": moose_dir}
+            )

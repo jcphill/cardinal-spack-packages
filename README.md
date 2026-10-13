@@ -52,7 +52,7 @@ everything needed to run immediately — no manual environment setup.
 | `+dagmc` (needs `+openmc`) | off | Build OpenMC with DAGMC support for CAD/mesh geometries |
 | `+double_down` (needs `+dagmc`) | off | Double-precision Embree interface for DAGMC ray tracing |
 | `+cross_sections` (needs `+openmc`) | on | Install the ENDF/B-VII.1 data and set `OPENMC_CROSS_SECTIONS` |
-| `+tests` | off | Fetch the `test/tests/nek_ci` submodule data needed by `run_tests` |
+| `+tests` | off | Build `cardinal-unit` and cache the data/harness `spack test run cardinal` needs (see [Running tests](#running-tests)) |
 | `+cuda` (needs `+nek`) | off | Enable NekRS's OCCA CUDA backend for GPU-resident solves |
 | `+rocm` (needs `+nek`) | off | Enable NekRS's OCCA HIP backend for GPU-resident solves on AMD GPUs |
 
@@ -115,6 +115,44 @@ cardinal-opt -i my_input.i
   dependency, pointing at its installed `cross_sections.xml`.
 
 No other manual environment setup is needed to run a Cardinal input.
+
+## Running tests
+
+```console
+spack install cardinal +tests
+spack test run cardinal
+spack test results -l
+```
+
+`spack test run` applies the same run environment `spack load` does
+(`PATH`, `NEKRS_HOME`, etc.), so nothing else needs to be set up by hand.
+`+tests` wires up two independent things, matching the two independent
+ways Cardinal tests itself:
+
+- **`test_unit`** runs `cardinal-unit`, Cardinal's own GoogleTest-based
+  unit test suite (`unit/src/*Test.C`). This is a separate executable
+  built by its own small Makefile in `unit/`, unrelated to `run_tests`;
+  `+tests` builds it (cheap — it only compiles a handful of files against
+  the already-built MOOSE/Cardinal libraries) and installs it alongside
+  `cardinal-opt`.
+- **`test_run_tests`** runs the `nek_ci` regression tests (input files
+  checked against gold output) through MOOSE's `TestHarness`, the same
+  mechanism the manual `./run_tests` workflow uses. Since the build stage
+  is gone by the time `spack test run` executes, `+tests` caches
+  everything this needs into the install prefix's test directory at
+  install time: `run_tests`, `testroot`, the `test/tests/nek_ci` submodule
+  data, and a relocatable copy of `TestHarness` (assembled via MOOSE's own
+  `install_python` make target, which also pulls in the two compiled
+  Python extensions `TestHarness`'s imports actually need —
+  `framework/contrib/hit`'s `hit` module and `pycapabilities`'s
+  `_pycapabilities` — that a hand-picked subset of `python/` would miss).
+  Only the `nek_ci` subset of Cardinal's full test suite is covered; the
+  rest (`auxkernels`, `criticality`, `neutronics`, `nek_standalone`, etc.)
+  is plausibly coverable with more work, but isn't wired up yet.
+
+`+tests` adds roughly 220 MB to the install (mostly the `nek_ci` data,
+which is fetched during checkout either way); the default install is
+unaffected.
 
 ## Cray / Slingshot systems
 
@@ -274,9 +312,9 @@ cross-checks matching the CPU and CUDA builds.
 - Validated end-to-end on one Cray EX / Slingshot system with `gcc@13.3.1`,
   an NVIDIA A100 (`+cuda`), and an AMD MI100 (`+rocm`); other
   compilers/platforms/GPUs haven't been exercised.
-- `+tests` fetches the test data submodule but doesn't yet wire up a
-  Spack `test()`/`run_test` hook to actually invoke `run_tests`.
-- No `spack test` integration.
+- `+tests`'s `spack test run cardinal` only covers the `nek_ci` subset of
+  Cardinal's test suite (see [Running tests](#running-tests)); the rest
+  needs submodules/data this package doesn't fetch.
 - Spack's `libmesh` package unconditionally passes
   `--enable-gzstreams=no` (it can't point libMesh's configure at a
   specific zlib install location, so it disables gzstream support
