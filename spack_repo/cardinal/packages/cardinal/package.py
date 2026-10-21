@@ -160,6 +160,13 @@ class Cardinal(MakefilePackage, CudaPackage, ROCmPackage):
     depends_on("cxx", type="build")
     depends_on("fortran", type="build")
 
+    # NekRS and OpenMC are each their own in-tree CMake sub-builds, invoked
+    # directly from config/{nekrs,openmc}.mk's own "cmake ..." recipe lines
+    # -- this package is a MakefilePackage, not a CMakePackage, so Spack
+    # never adds cmake to the build DAG on its own. 3.21 matches NekRS's own
+    # cmake_minimum_required().
+    depends_on("cmake@3.21:", type="build")
+
     # MOOSE's framework/contrib/hit Python bindings are a pre-generated
     # Cython .cpp file; moose.mk compiles it against whatever "python3-config"
     # resolves first on PATH, with no Spack dependency of its own to pin
