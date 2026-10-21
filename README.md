@@ -161,8 +161,8 @@ By default, Spack will build its own generic `openmpi` to satisfy
 one with `PrgEnv-gnu` and a `cray-mpich` module), that misses the
 high-speed interconnect entirely and doesn't match how jobs actually get
 launched (Slurm's `cray_shasta` MPI type). To use the system's MPI
-instead, register it as an external in your own (not this repo's)
-`packages.yaml`, e.g.:
+instead, register it as an external by adding the following to
+`~/.spack/packages.yaml` or `$SPACK_ROOT/etc/spack/site/packages.yaml`:
 
 ```yaml
 packages:
@@ -312,16 +312,20 @@ cross-checks matching the CPU and CUDA builds.
 NekRS's own `CMakeLists.txt` unconditionally refuses to configure under
 Apple's Clang (`AppleClang`, the compiler Xcode/the Command Line Tools
 install at `/usr/bin/clang`) on arm64 (`FATAL_ERROR "Apple Clang compiler
-currently not supported on arm64!"`) -- a real upstream limitation, not a
-Spack packaging issue. `cardinal`'s `package.py` enforces this with a
-`conflicts("%apple-clang", when="platform=darwin target=aarch64:")`, so
-Spack refuses to concretize with Apple's compiler on an M1/M2/M3/etc. Mac
-rather than failing partway through a long NekRS build.
+currently not supported on arm64!"`), so cardinal/package.py includes
+`conflicts("%apple-clang", when="platform=darwin target=aarch64:")` so
+Spack refuses to concretize rather than failing partway through a build.
 
-Build with a different compiler, e.g. GCC:
+Build with a different compiler, e.g. GCC -- but `spack install cardinal
+%gcc` alone isn't enough: a bare `%` constrains only the one node it's
+attached to, not its dependencies. Force it for the whole DAG instead by
+adding the following to `~/.spack/packages.yaml` or
+`$SPACK_ROOT/etc/spack/site/packages.yaml`:
 
-```console
-$ spack install cardinal %gcc
+```yaml
+packages:
+  all:
+    require: "%gcc"
 ```
 
 (Register a `gcc` toolchain first if you don't already have one --
