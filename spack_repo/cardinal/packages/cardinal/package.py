@@ -83,6 +83,11 @@ class Cardinal(MakefilePackage, CudaPackage, ROCmPackage):
     # nor +rocm is requested.
     patch("nekrs_disable_hypre_gpu.patch")
 
+    # config/check_deps.mk's FMT_DIR/PUGI_DIR are a FetchContent source
+    # override, not an install prefix like every other *_DIR/*_ROOT here.
+    # Adds FMT_ROOT/PUGI_ROOT for that case.
+    patch("openmc_fmt_pugixml_root.patch")
+
     variant("openmc", default=True, description="Couple with OpenMC for neutronics")
     variant("nek", default=True, description="Couple with NekRS for CFD")
     variant(
@@ -301,14 +306,9 @@ class Cardinal(MakefilePackage, CudaPackage, ROCmPackage):
         if spec.satisfies("+nek"):
             env.set("NEKRS_HOME", self.prefix)
 
-        # OpenMC's CMake consumes FETCHCONTENT_SOURCE_DIR_FMT/_PUGIXML
-        # (config/check_deps.mk derives these from FMT_DIR/PUGI_DIR, which
-        # otherwise default to the unpopulated contrib/fmt and
-        # contrib/pugixml submodule paths this package doesn't fetch), so
-        # point them at the Spack-built fmt/pugixml.
         if spec.satisfies("+openmc"):
-            env.set("FMT_DIR", spec["fmt"].prefix)
-            env.set("PUGI_DIR", spec["pugixml"].prefix)
+            env.set("FMT_ROOT", spec["fmt"].prefix)
+            env.set("PUGI_ROOT", spec["pugixml"].prefix)
 
         # Spack doesn't put a type="build" python dependency's bin/ on PATH
         # automatically (that only happens for packages that *extend*

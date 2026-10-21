@@ -1,0 +1,81 @@
+diff --git a/config/check_deps.mk b/config/check_deps.mk
+index a626088..99afe6a 100644
+--- a/config/check_deps.mk
++++ b/config/check_deps.mk
+@@ -8,6 +8,11 @@ NEKRS_DIR           ?= $(CONTRIB_DIR)/nekRS
+ OPENMC_DIR          ?= $(CONTRIB_DIR)/openmc
+ FMT_DIR             ?= $(CONTRIB_DIR)/fmt
+ PUGI_DIR            ?= $(CONTRIB_DIR)/pugixml
++# FMT_ROOT/PUGI_ROOT point at an already-built install, like HDF5_ROOT;
++# unset by default.
++FMT_ROOT            ?=
++PUGI_ROOT           ?=
++OPENMC_FORCE_FETCHCONTENT ?= off
+ NUCLEARDATA_DIR     ?= $(CONTRIB_DIR)/nuclear_data
+ DAGMC_DIR           ?= $(CONTRIB_DIR)/DAGMC
+ DOUBLEDOWN_DIR      ?= $(CONTRIB_DIR)/double-down
+@@ -102,13 +107,43 @@ ifeq ($(ENABLE_OPENMC), yes)
+   ifneq ($(FMT_CONTENT),)
+     $(info OpenMC is using fmt from               $(FMT_DIR))
+     FMT_DEFS := -DFETCHCONTENT_SOURCE_DIR_FMT=$(FMT_DIR)
++    OPENMC_FORCE_FETCHCONTENT := on
+   endif
+ 
+   ifneq ($(PUGI_CONTENT),)
+     $(info OpenMC is using pugixml from           $(PUGI_DIR))
+     PUGI_DEFS := -DFETCHCONTENT_SOURCE_DIR_PUGIXML=$(PUGI_DIR)
++    OPENMC_FORCE_FETCHCONTENT := on
+   endif
+ 
++  # OPENMC_FORCE_FETCHCONTENT is a single, OpenMC-wide CMake option, not a
++  # per-dependency one: once either fmt or pugixml is being built from a
++  # vendored FMT_DIR/PUGI_DIR checkout, find_package() is skipped for
++  # *both*, so an installed FMT_ROOT/PUGI_ROOT would be silently ignored --
++  # warn instead of claiming it's being used.
++  ifeq ($(OPENMC_FORCE_FETCHCONTENT),on)
++    ifneq ($(FMT_ROOT),)
++      $(warning $n"***WARNING***: FMT_ROOT=$(FMT_ROOT) will be ignored: a vendored fmt or pugixml checkout is forcing OpenMC to fetch/build its own copies from source."$n)
++    endif
++    ifneq ($(PUGI_ROOT),)
++      $(warning $n"***WARNING***: PUGI_ROOT=$(PUGI_ROOT) will be ignored: a vendored fmt or pugixml checkout is forcing OpenMC to fetch/build its own copies from source."$n)
++    endif
++  else
++    ifneq ($(FMT_ROOT),)
++      $(info OpenMC is using fmt from               $(FMT_ROOT))
++    endif
++    ifneq ($(PUGI_ROOT),)
++      $(info OpenMC is using pugixml from           $(PUGI_ROOT))
++    endif
++  endif
++
++  # An already-built fmt/pugixml is handed to OpenMC's find_package() via
++  # CMAKE_PREFIX_PATH (config/openmc.mk) rather than FETCHCONTENT_SOURCE_DIR_*,
++  # which is reserved for an actual source checkout to build via FetchContent.
++  empty :=
++  space := $(empty) $(empty)
++  OPENMC_PREFIX_PATH := $(subst $(space),;,$(strip $(LIBMESH_DIR) $(FMT_ROOT) $(PUGI_ROOT)))
++
+   ifeq ($(NUCLEARDATA_CONTENT),)
+     $(error $n"nuclear_data does not seem to be available, but ENABLE_OPENMC is enabled. Make sure that the submodule is checked out.$n$nTo fetch the nuclear_data submodule, use ./scripts/get-dependencies.sh")
+   else
+diff --git a/config/openmc.mk b/config/openmc.mk
+index 306c999..463f935 100644
+--- a/config/openmc.mk
++++ b/config/openmc.mk
+@@ -10,14 +10,14 @@ $(OPENMC_BUILDDIR)/Makefile: build_dagmc | $(OPENMC_DIR)/CMakeLists.txt
+ 	-DCMAKE_C_COMPILER="$(LIBMESH_CC_LIST)" \
+ 	-DCMAKE_CXX_COMPILER="$(LIBMESH_CXX_LIST)" \
+ 	-DCMAKE_Fortran_COMPILER="$(LIBMESH_F90_LIST)" \
+-	-DCMAKE_PREFIX_PATH=$(LIBMESH_DIR) \
++	-DCMAKE_PREFIX_PATH=$(OPENMC_PREFIX_PATH) \
+ 	-DCMAKE_INSTALL_PREFIX=$(OPENMC_INSTALL_DIR) \
+ 	-DCMAKE_INSTALL_LIBDIR=$(OPENMC_LIBDIR) \
+ 	-DCMAKE_CXX_STANDARD=17 \
+ 	-DCMAKE_CXX_FLAGS="-Wno-error=reorder" \
+ 	-DCMAKE_INSTALL_MESSAGE=LAZY \
+ 	-DOPENMC_BUILD_TESTS=off \
+-	-DOPENMC_FORCE_FETCHCONTENT=on \
++	-DOPENMC_FORCE_FETCHCONTENT=$(OPENMC_FORCE_FETCHCONTENT) \
+ 	$(FMT_DEFS) \
+ 	$(PUGI_DEFS) \
+ 	$(OPENMC_DIR)
