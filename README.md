@@ -307,6 +307,30 @@ Validated with the bundled `test/tests/nek_standalone/channel` case on an
 AMD MI100: `active occa mode: HIP`, a full converged solve, postprocessor
 cross-checks matching the CPU and CUDA builds.
 
+## macOS (Apple Silicon) systems
+
+NekRS's own `CMakeLists.txt` unconditionally refuses to configure under
+Apple's Clang (`AppleClang`, the compiler Xcode/the Command Line Tools
+install at `/usr/bin/clang`) on arm64 (`FATAL_ERROR "Apple Clang compiler
+currently not supported on arm64!"`) -- a real upstream limitation, not a
+Spack packaging issue. `cardinal`'s `package.py` enforces this with a
+`conflicts("%apple-clang", when="platform=darwin target=aarch64:")`, so
+Spack refuses to concretize with Apple's compiler on an M1/M2/M3/etc. Mac
+rather than failing partway through a long NekRS build.
+
+Build with a different compiler, e.g. GCC:
+
+```console
+$ spack install cardinal %gcc
+```
+
+(Register a `gcc` toolchain first if you don't already have one --
+Homebrew's `gcc` works, or `spack install gcc` to build your own.) This
+also resolves a second, related failure: OpenMC's build does an
+unconditional `find_package(OpenMP REQUIRED)` that fails against Apple's
+Clang (it doesn't ship OpenMP support out of the box), but works with no
+extra configuration under GCC.
+
 ## Known limitations
 
 - Validated end-to-end on one Cray EX / Slingshot system with `gcc@13.3.1`,

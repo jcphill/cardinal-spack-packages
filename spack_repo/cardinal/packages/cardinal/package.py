@@ -137,6 +137,20 @@ class Cardinal(MakefilePackage, CudaPackage, ROCmPackage):
     # both would silently build HIP support that can never be selected.
     conflicts("+cuda+rocm", msg="NekRS only runs one OCCA GPU backend per build")
 
+    # NekRS's own CMakeLists.txt unconditionally refuses to configure under
+    # AppleClang on arm64 (`string(COMPARE EQUAL "${CMAKE_CXX_COMPILER_ID}"
+    # "AppleClang" USING_APPLE_LLVM)`, then `if(USING_APPLE_LLVM AND
+    # CMAKE_SYSTEM_PROCESSOR MATCHES "arm64") message(FATAL_ERROR ...)`) --
+    # confirmed as a real, hard upstream limitation, not a Spack/environment
+    # issue. Enforce it at concretization time rather than letting users hit
+    # it mid-build on Apple Silicon.
+    conflicts(
+        "%apple-clang",
+        when="platform=darwin target=aarch64:",
+        msg="NekRS/OCCA does not support AppleClang on Apple Silicon. Build "
+        "with a different compiler, e.g. `%gcc` (from Spack or Homebrew).",
+    )
+
     # Spack only sets up the compiler-wrapper environment
     # (SPACK_COMPILER_WRAPPER_PATH etc.) for languages a package
     # depends_on -- NekRS's CMake configure (invoked from this package's
