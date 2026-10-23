@@ -89,8 +89,14 @@ class Cardinal(MakefilePackage, CudaPackage, ROCmPackage):
     # Adds FMT_ROOT/PUGI_ROOT for that case.
     patch("openmc_fmt_pugixml_root.patch")
 
-    variant("openmc", default=True, description="Couple with OpenMC for neutronics")
-    variant("nek", default=True, description="Couple with NekRS for CFD")
+    # sticky=True: without it, Spack's concretizer treats "default=True"
+    # as a soft preference it can override to minimize the number of
+    # packages it needs to build -- confirmed by a real `spack install
+    # cardinal` (no explicit +openmc) resolving to ~openmc solely to
+    # avoid building fmt/pugixml/openmc-endfb71-hdf5-data from scratch,
+    # even though `spack solve cardinal +openmc` concretizes cleanly.
+    variant("openmc", default=True, sticky=True, description="Couple with OpenMC for neutronics")
+    variant("nek", default=True, sticky=True, description="Couple with NekRS for CFD")
     variant(
         "dagmc",
         default=False,
