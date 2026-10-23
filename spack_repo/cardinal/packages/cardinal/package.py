@@ -5,6 +5,7 @@
 import glob
 import os
 import re
+import sys
 
 from spack_repo.builtin.build_systems.cuda import CudaPackage
 from spack_repo.builtin.build_systems.makefile import MakefilePackage
@@ -171,6 +172,11 @@ class Cardinal(MakefilePackage, CudaPackage, ROCmPackage):
     # never adds cmake to the build DAG on its own. 3.21 matches NekRS's own
     # cmake_minimum_required().
     depends_on("cmake@3.21:", type="build")
+
+    # gslib/parRSB's own "install" scripts (fetched by the in-tree Nek5000
+    # dependency build) hardcode "wget --no-check-certificate" with no
+    # curl fallback.
+    depends_on("wget", type="build", when="+nek")
 
     # MOOSE's framework/contrib/hit Python bindings are a pre-generated
     # Cython .cpp file; moose.mk compiles it against whatever "python3-config"
@@ -420,6 +426,35 @@ class Cardinal(MakefilePackage, CudaPackage, ROCmPackage):
             # silently missing one of those compiled extensions.
             make(*self._make_flags(), "install_python", f"PREFIX={self._test_python_prefix}")
 
+    def _shared_lib_deps(self, binary):
+        # macOS has no `ldd`; `otool -L` is Apple's equivalent, but with a
+        # different output format (first line is the binary itself, each
+        # dependency afterwards is "<path> (compatibility version ...,
+        # current version ...)" rather than ldd's "name => path (address)").
+        # Returns (raw_line, resolved_path) pairs so callers can both act on
+        # the path and report the original line in error messages.
+        deps = []
+        if sys.platform == "darwin":
+            otool = which("otool", required=True)
+            output = otool("-L", binary, output=str, error=str)
+            for line in output.splitlines()[1:]:
+                line = line.strip()
+                if not line:
+                    continue
+                resolved = line.split(" (", 1)[0].strip()
+                deps.append((line, resolved))
+        else:
+            ldd = which("ldd", required=True)
+            output = ldd(binary, output=str, error=str)
+            for line in output.splitlines():
+                if "=>" not in line:
+                    continue
+                resolved = line.split("=>", 1)[1].strip().split()[0]
+                if resolved in ("not", ""):
+                    continue
+                deps.append((line.strip(), resolved))
+        return deps
+
     def install(self, spec, prefix):
         # Cardinal has no `make install` target (OpenMC/NekRS/etc. are
         # already in `prefix` via CONTRIB_INSTALL_DIR from build()), so
@@ -434,7 +469,8 @@ class Cardinal(MakefilePackage, CudaPackage, ROCmPackage):
         # at the (temporary) build tree. Rather than hardcoding that list
         # of build-tree subdirectories (fragile to the exact set of MOOSE
         # modules Cardinal enables), find them the way the loader would:
-        # run ldd on the still-in-place build-tree binary, collect the
+        # inspect the still-in-place build-tree binary's shared library
+        # dependencies (ldd on Linux, otool -L on macOS), collect the
         # directories of every dependency that resolved inside the stage,
         # and copy those libraries into prefix.lib -- already on
         # cardinal-opt's RPATH (where CONTRIB_INSTALL_DIR=self.prefix put
@@ -456,22 +492,15 @@ class Cardinal(MakefilePackage, CudaPackage, ROCmPackage):
         if spec.satisfies("+tests") and os.path.exists(unit_binary):
             binaries.append(unit_binary)
 
-        ldd = which("ldd", required=True)
         cp = which("cp", required=True)
         lib_dirs = set()
         for binary in binaries:
-            output = ldd(binary, output=str, error=str)
-            for line in output.splitlines():
-                if "=>" not in line:
-                    continue
-                resolved = line.split("=>", 1)[1].strip().split()[0]
-                if resolved in ("not", ""):
-                    continue
+            for _line, resolved in self._shared_lib_deps(binary):
                 if resolved.startswith(self.stage.source_path):
                     lib_dirs.add(os.path.dirname(resolved))
 
         for lib_dir in lib_dirs:
-            libs = glob.glob(join_path(lib_dir, "*.so*"))
+            libs = glob.glob(join_path(lib_dir, "*.so*")) + glob.glob(join_path(lib_dir, "*.dylib"))
             if libs:
                 cp("-a", *libs, prefix.lib)
 
@@ -595,26 +624,21 @@ class Cardinal(MakefilePackage, CudaPackage, ROCmPackage):
         # find_package(HDF5) calls) independently discovering a different
         # HDF5 if HDF5_ROOT/CMAKE_PREFIX_PATH don't reach it, producing a
         # cardinal-opt that's internally inconsistent. Checking the final
-        # linked binary with ldd verifies what's actually in use at
-        # runtime.
+        # linked binary's shared library dependencies (ldd on Linux,
+        # otool -L on macOS) verifies what's actually in use at runtime.
         hdf5_prefix = os.path.realpath(self.spec["hdf5"].prefix)
-        ldd = which("ldd", required=True)
         binaries = [join_path(self.prefix.bin, "cardinal-opt")]
         dbg = join_path(self.prefix.bin, "cardinal-dbg")
         if os.path.exists(dbg):
             binaries.append(dbg)
         for binary in binaries:
-            output = ldd(binary, output=str, error=str)
             bad = []
-            for line in output.splitlines():
-                if "libhdf5" not in line or "=>" not in line:
-                    continue
-                resolved = line.split("=>", 1)[1].strip().split()[0]
-                if resolved in ("not", ""):
+            for line, resolved in self._shared_lib_deps(binary):
+                if "libhdf5" not in os.path.basename(resolved):
                     continue
                 resolved = os.path.realpath(resolved)
                 if not resolved.startswith(hdf5_prefix):
-                    bad.append((line.strip(), resolved))
+                    bad.append((line, resolved))
             if bad:
                 details = "\n".join(f"  {line}  (resolves to {r})" for line, r in bad)
                 raise InstallError(
