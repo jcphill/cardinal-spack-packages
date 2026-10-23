@@ -45,20 +45,7 @@ class Cardinal(MakefilePackage, CudaPackage, ROCmPackage):
 
     # Cardinal has no tagged releases in active use; devel is the branch
     # the project actually develops and tests against.
-    #
-    # no_cache=True: submodules=submodules is a *callable* -- which
-    # submodules get checked out depends on package.spec (+openmc/+nek/
-    # +dagmc/...), so the same resolved commit can legitimately produce
-    # different checked-out content depending on which variants are
-    # active. Spack's git source-cache keys its cached archive only by
-    # commit, with no way to account for that, so without no_cache=True
-    # an earlier build with one variant combination can silently poison
-    # the cache for a later build of the same commit needing more
-    # submodules (confirmed by a real failure: a cached archive from a
-    # ~openmc build got reused for a later +openmc build, which then
-    # failed with "OpenMC does not seem to be available" despite
-    # submodules() correctly listing contrib/openmc).
-    version("devel", branch="devel", submodules=submodules, get_full_repo=False, no_cache=True)
+    version("devel", branch="devel", submodules=submodules, get_full_repo=False)
 
     # libMesh's Autotools build links its legacy, bundled ExodusII sources
     # (contrib/exodusii/Lib), which predate the "partial I/O" API
@@ -191,6 +178,13 @@ class Cardinal(MakefilePackage, CudaPackage, ROCmPackage):
     # never adds cmake to the build DAG on its own. 3.21 matches NekRS's own
     # cmake_minimum_required().
     depends_on("cmake@3.21:", type="build")
+
+    # OpenMC's own cmake/Modules/FindLIBMESH.cmake locates libMesh via
+    # find_package(PkgConfig) + libMesh's own .pc file -- pkgconf/pkg-config
+    # is otherwise only in this DAG as a transitive build dependency of
+    # hdf5, not on PATH for Cardinal's own build (confirmed by a real
+    # failure: "Could NOT find PkgConfig (missing: PKG_CONFIG_EXECUTABLE)").
+    depends_on("pkgconfig", type="build", when="+openmc")
 
     # gslib/parRSB's own "install" scripts (fetched by the in-tree Nek5000
     # dependency build) hardcode "wget --no-check-certificate" with no
@@ -416,6 +410,36 @@ class Cardinal(MakefilePackage, CudaPackage, ROCmPackage):
             f"OCCA_CUDA_ENABLED={'1' if spec.satisfies('+cuda') else '0'}",
             f"OCCA_HIP_ENABLED={'1' if spec.satisfies('+rocm') else '0'}",
         ]
+
+    @run_before("build")
+    def ensure_submodules(self):
+        # submodules=submodules (see the version() directive above) is a
+        # *callable* -- which submodules get checked out depends on
+        # self.spec (+openmc/+nek/+dagmc/...), so the same resolved commit
+        # can legitimately need different submodules depending on which
+        # variants are active. Spack's git source-cache keys its cached
+        # archive only by commit, with no way to account for that, and
+        # (confirmed directly, by deleting a cache entry and re-fetching)
+        # setting no_cache=True on the version() does NOT stop Spack from
+        # writing -- or reading -- that cache. So a build with one variant
+        # combination can silently leave a stale, incomplete cache entry
+        # that a later build of the same commit needing more submodules
+        # reuses, failing with e.g. "OpenMC does not seem to be available"
+        # despite submodules() correctly listing contrib/openmc. Rather
+        # than depend on Spack's cache behaving correctly here, verify
+        # every submodule this build actually needs is really present and
+        # fetch any that aren't, regardless of what the cache served.
+        missing = [
+            path
+            for path in submodules(self)
+            if not os.path.isdir(join_path(self.stage.source_path, path))
+            or not os.listdir(join_path(self.stage.source_path, path))
+        ]
+        if missing:
+            tty.warn(f"Submodule(s) missing from cache, fetching directly: {', '.join(missing)}")
+            with working_dir(self.stage.source_path):
+                git = which("git", required=True)
+                git("submodule", "update", "--init", "--recursive", "--", *missing)
 
     def build(self, spec, prefix):
         make(*self._make_flags())
