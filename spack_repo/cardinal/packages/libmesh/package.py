@@ -2,6 +2,7 @@
 #
 # SPDX-License-Identifier: (Apache-2.0 OR MIT)
 
+import glob
 import os
 
 from spack_repo.builtin.packages.libmesh.package import Libmesh as BuiltinLibmesh
@@ -55,3 +56,20 @@ class Libmesh(BuiltinLibmesh):
         if mpif90:
             args.append(f"FC={mpif90}")
         return args
+
+    @run_after("install")
+    def fix_pkgconfig_usr_include(self):
+        # libMesh's ./configure pthread-detection macro unconditionally
+        # bakes a literal "-I/usr/include" into the Cflags of every
+        # generated pkg-config file, regardless of platform. Harmless on
+        # Linux (that directory always exists there), but macOS hasn't
+        # shipped a top-level /usr/include since Catalina -- and modern
+        # CMake's pkg_check_modules()-derived IMPORTED targets hard-error
+        # on any nonexistent INTERFACE_INCLUDE_DIRECTORIES entry (confirmed
+        # by a real failure: OpenMC's FindLIBMESH.cmake, which locates
+        # libMesh via find_package(PkgConfig), failing with 'Imported
+        # target "PkgConfig::LIBMESH" includes non-existent path
+        # "/usr/include"'). Strip the bogus entry everywhere it landed.
+        pc_files = glob.glob(join_path(self.prefix, "**", "*.pc"), recursive=True)
+        if pc_files:
+            filter_file(r"-I/usr/include\b\s*", "", *pc_files)
