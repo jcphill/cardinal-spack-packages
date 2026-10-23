@@ -193,7 +193,7 @@ package.py phase), the same incremental behavior you'd get running
 `make` by hand:
 
 ```console
-spack dev-build cardinal dev_path=/path/to/your/cardinal/checkout +nek +openmc
+spack dev-build -d /path/to/your/cardinal/checkout cardinal +nek +openmc
 ```
 
 Notes:
