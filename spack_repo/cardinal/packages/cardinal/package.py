@@ -468,24 +468,20 @@ class Cardinal(MakefilePackage, CudaPackage, ROCmPackage):
                     return candidate
         return dep
 
-    def _fix_macos_install_names(self, files):
-        # Most Cardinal/MOOSE-built shared libraries record their own
-        # dependencies as "@rpath/libfoo.dylib", which resolves fine once
-        # prefix.lib (already on every installed binary's LC_RPATH) holds
-        # the copy made above -- but at least one (test/lib's
-        # libcardinal_test-opt) instead gets the linker's default install
-        # name, the literal absolute build-tree path, which breaks the
-        # moment the build stage is removed (confirmed by a real failure:
-        # "Library not loaded: /.../spack-stage-.../spack-src/test/lib/
-        # libcardinal_test-opt.0.dylib"). Rewrite every dependency still
-        # pointing into the stage -- on every installed binary and on the
-        # libraries just copied into prefix.lib, in case of inter-library
-        # dependencies -- to the @rpath form the properly-built libraries
-        # already use.
+    def _fix_macos_install_names(self, files, stage_realpath):
+        # Every Cardinal/MOOSE-built shared library (linked via libtool,
+        # not CMake) gets the linker's default install name -- the literal
+        # absolute build-tree path -- rather than "@rpath/libfoo.dylib",
+        # which breaks the moment the build stage is removed (confirmed by
+        # a real failure: "Library not loaded: /.../spack-stage-.../
+        # spack-src/test/lib/libcardinal_test-opt.0.dylib"). Rewrite every
+        # dependency still pointing into the stage -- on every installed
+        # binary and on the libraries just copied into prefix.lib, in case
+        # of inter-library dependencies -- to the @rpath form.
         install_name_tool = which("install_name_tool", required=True)
         for f in files:
             for _line, resolved in self._shared_lib_deps(f):
-                if resolved.startswith(self.stage.source_path):
+                if os.path.realpath(resolved).startswith(stage_realpath):
                     install_name_tool("-change", resolved, f"@rpath/{os.path.basename(resolved)}", f)
 
     def _shared_lib_deps(self, binary):
@@ -561,11 +557,18 @@ class Cardinal(MakefilePackage, CudaPackage, ROCmPackage):
         if spec.satisfies("+tests") and os.path.exists(unit_binary):
             binaries.append(unit_binary)
 
+        # realpath'd because on macOS the stage lives under $TMPDIR, a
+        # symlink (/var/folders/... -> /private/var/folders/...) -- Python
+        # reports the former, but libtool/ld record the latter in every
+        # install name they embed, so a bare string compare against
+        # self.stage.source_path silently matches nothing at all here.
+        stage_realpath = os.path.realpath(self.stage.source_path)
+
         cp = which("cp", required=True)
         lib_dirs = set()
         for binary in binaries:
             for _line, resolved in self._shared_lib_deps(binary):
-                if resolved.startswith(self.stage.source_path):
+                if os.path.realpath(resolved).startswith(stage_realpath):
                     lib_dirs.add(os.path.dirname(resolved))
 
         copied_libs = []
@@ -580,7 +583,7 @@ class Cardinal(MakefilePackage, CudaPackage, ROCmPackage):
 
         if sys.platform == "darwin":
             installed_binaries = [join_path(prefix.bin, os.path.basename(b)) for b in binaries]
-            self._fix_macos_install_names(installed_binaries + copied_libs)
+            self._fix_macos_install_names(installed_binaries + copied_libs, stage_realpath)
 
         # MOOSE also expects certain modules' "data" directories at
         # PREFIX/share/<name>/data (Registry.C's determineDataFilePath(),
