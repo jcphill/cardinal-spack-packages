@@ -522,10 +522,22 @@ class Cardinal(MakefilePackage, CudaPackage, ROCmPackage):
         # binary and on the libraries just copied into prefix.lib, in case
         # of inter-library dependencies -- to the @rpath form.
         install_name_tool = which("install_name_tool", required=True)
+        codesign = which("codesign", required=True)
         for f in files:
+            changed = False
             for _line, resolved in self._shared_lib_deps(f):
                 if os.path.realpath(resolved).startswith(stage_realpath):
                     install_name_tool("-change", resolved, f"@rpath/{os.path.basename(resolved)}", f)
+                    changed = True
+            if changed:
+                # install_name_tool edits the Mach-O load commands in
+                # place, which invalidates whatever ad-hoc signature the
+                # linker applied at build time. On Apple Silicon the
+                # kernel refuses to exec a binary whose signature doesn't
+                # match its current content at all -- not a crash, just a
+                # silent "zsh: killed" with no diagnostic (confirmed by a
+                # real failure). Re-sign ad-hoc to restore a valid one.
+                codesign("--force", "--sign", "-", f)
 
     def _shared_lib_deps(self, binary):
         # macOS has no `ldd`; `otool -L` is Apple's equivalent, but with a
