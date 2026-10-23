@@ -81,6 +81,25 @@ spack repo add cardinal-spack-packages/spack_repo/cardinal
 spack install cardinal
 ```
 
+**The plain `spack install cardinal` above only works as shown in a clean,
+"vanilla" environment** (a fresh Linux x86_64 box with no conda/other
+package manager on `PATH`, and no site-specific MPI to worry about) --
+most real systems need one of the special-case sections below first:
+
+- **On a supercomputer / cluster**, letting Spack pick its own `mpi`
+  provider almost always means it builds a generic `openmpi` from
+  scratch, missing whatever vendor interconnect (Slingshot, InfiniBand)
+  the machine actually uses and not matching how jobs get launched there.
+  See [Cray / Slingshot systems](#cray--slingshot-systems) for how to
+  register and require the system MPI instead -- the same pattern
+  applies to any site-provided MPI, not just Cray's.
+- **On macOS**, see [macOS (Apple Silicon) systems](#macos-apple-silicon-systems)
+  first -- AppleClang can't build this package at all, and several
+  common build tools need to come from Homebrew rather than being built
+  from source by Spack.
+- **For GPU support**, see the [CUDA](#gpu-cuda-systems) and
+  [ROCm/HIP](#gpu-rocmhip-systems) sections.
+
 A full build (PETSc, libMesh, WASP, NekRS, OpenMC, and everything else)
 takes on the order of 30–40 minutes. To build with a specific job limit
 (e.g. on a shared login node):
@@ -318,22 +337,96 @@ Spack refuses to concretize rather than failing partway through a build.
 
 Build with a different compiler, e.g. GCC -- but `spack install cardinal
 %gcc` alone isn't enough: a bare `%` constrains only the one node it's
-attached to, not its dependencies. Force it for the whole DAG instead by
-adding the following to `~/.spack/packages.yaml` or
-`$SPACK_ROOT/etc/spack/site/packages.yaml`:
+attached to, not its dependencies. This also resolves a second, related
+failure: OpenMC's build does an unconditional `find_package(OpenMP
+REQUIRED)` that fails against Apple's Clang (it doesn't ship OpenMP
+support out of the box), but works with no extra configuration under GCC.
+
+If conda/miniforge is installed, run `conda deactivate` first (or avoid
+building from a shell with a conda environment active) -- a conda
+environment on `PATH` ahead of Homebrew can quietly shadow the compilers
+and build tools below with its own copies, producing confusing failures
+unrelated to Cardinal or Spack themselves.
+
+Install build tooling via Homebrew rather than letting Spack build it all
+from source -- several of these have real, confirmed failures building
+from source against a recent macOS SDK, or work around a DAG-selection
+bug, not just "slow to build":
+
+```
+brew install gcc cmake make open-mpi wget python
+```
+
+Then register them in `~/.spack/packages.yaml` or
+`$SPACK_ROOT/etc/spack/site/packages.yaml` (adjust versions/paths to
+match what `brew info <formula>` reports on your machine):
 
 ```yaml
 packages:
-  all:
-    require: "%gcc"
+  c:
+    require:
+    - gcc
+  cxx:
+    require:
+    - gcc
+  fortran:
+    require:
+    - gcc
+  cmake:
+    externals:
+    - spec: cmake@4.4.4
+      prefix: /opt/homebrew
+    buildable: false
+  gmake:
+    externals:
+    - spec: gmake@4.4.1
+      extra_attributes:
+        environment:
+          prepend_path:
+            PATH: /opt/homebrew/opt/make/libexec/gnubin
+    buildable: false
+  openmpi:
+    externals:
+    - spec: openmpi@5.0.11
+      prefix: /opt/homebrew/Cellar/open-mpi/5.0.11
+    buildable: false
+  mpi:
+    require: openmpi
+  wget:
+    externals:
+    - spec: wget@1.25.0
+      prefix: /opt/homebrew
+    buildable: false
+  python:
+    externals:
+    - spec: python@3.13.1
+      prefix: /opt/homebrew
+    buildable: false
 ```
 
-(Register a `gcc` toolchain first if you don't already have one --
-Homebrew's `gcc` works, or `spack install gcc` to build your own.) This
-also resolves a second, related failure: OpenMC's build does an
-unconditional `find_package(OpenMP REQUIRED)` that fails against Apple's
-Clang (it doesn't ship OpenMP support out of the box), but works with no
-extra configuration under GCC.
+- `c`/`cxx`/`fortran` -- forces GCC for the whole DAG (a bare `%gcc` on
+  the root spec doesn't propagate to dependencies).
+- `cmake` -- NekRS/OpenMC's own in-tree CMake sub-builds already need
+  3.21+; no reason to also build cmake itself from source.
+- `gmake` -- Apple's `/usr/bin/make` is GNU Make 3.81 (pinned pre-GPLv3),
+  whose jobserver has a known "Bad file descriptor" bug under parallel
+  builds on recent macOS; building a newer gmake from source also fails
+  outright against this SDK (gnulib's `fnmatch.c` redeclares `getenv()`
+  the old K&R way, which the SDK's stricter prototype now rejects).
+  Homebrew's `make` formula installs as `gmake`, with a `gnubin`
+  directory that also provides it under the plain name `make` -- the
+  `prepend_path` above is what exposes that to the build.
+- `openmpi`/`mpi` -- without `mpi: require: openmpi`, the concretizer can
+  pick `mpi-serial` (a stub with no real MPI) for part of the DAG while
+  using real MPI elsewhere, breaking any package that expects
+  `spec["mpi"].mpicc` to exist. Point at the versioned Cellar prefix, not
+  the generic `/opt/homebrew` aggregate, so its headers don't mix with
+  every other formula's.
+- `wget` -- NekRS's vendored `gslib`/`parRSB` install scripts call `wget
+  --no-check-certificate` with no curl fallback; a from-source Spack
+  `wget` build is gnulib-heavy and carries the same SDK-compatibility
+  risk as `gmake` above.
+- `python` -- avoids a slow, unnecessary from-source CPython build.
 
 ## Known limitations
 
