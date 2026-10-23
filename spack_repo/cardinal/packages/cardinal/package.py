@@ -426,6 +426,48 @@ class Cardinal(MakefilePackage, CudaPackage, ROCmPackage):
             # silently missing one of those compiled extensions.
             make(*self._make_flags(), "install_python", f"PREFIX={self._test_python_prefix}")
 
+    def _macos_rpaths(self, binary):
+        # Parses `otool -l`'s LC_RPATH load commands, e.g.:
+        #   cmd LC_RPATH
+        #   cmdsize 48
+        #   path /some/dir (offset 12)
+        otool = which("otool", required=True)
+        lines = otool("-l", binary, output=str, error=str).splitlines()
+        rpaths = []
+        for i, line in enumerate(lines):
+            if line.strip() != "cmd LC_RPATH":
+                continue
+            for follow in lines[i + 1 : i + 4]:
+                follow = follow.strip()
+                if follow.startswith("path "):
+                    rpaths.append(follow[len("path ") :].rsplit(" (offset", 1)[0].strip())
+                    break
+        return rpaths
+
+    def _resolve_macos_dep(self, binary, dep, rpaths):
+        # otool -L prints the dependency's literal Mach-O install name, which
+        # is frequently "@rpath/libfoo.dylib" rather than an absolute path --
+        # the real location only exists by combining it with one of the
+        # binary's own LC_RPATH entries (what dyld does at load time), so a
+        # bare string match against self.stage.source_path/hdf5_prefix
+        # otherwise silently compares against a nonexistent, bogus path.
+        bindir = os.path.dirname(os.path.abspath(binary))
+
+        def expand(path):
+            if path.startswith(("@loader_path/", "@executable_path/")):
+                return os.path.normpath(join_path(bindir, path.split("/", 1)[1]))
+            return path
+
+        if dep.startswith(("@loader_path/", "@executable_path/")):
+            return expand(dep)
+        if dep.startswith("@rpath/"):
+            rel = dep[len("@rpath/") :]
+            for rpath in rpaths:
+                candidate = os.path.normpath(join_path(expand(rpath), rel))
+                if os.path.exists(candidate):
+                    return candidate
+        return dep
+
     def _shared_lib_deps(self, binary):
         # macOS has no `ldd`; `otool -L` is Apple's equivalent, but with a
         # different output format (first line is the binary itself, each
@@ -437,11 +479,16 @@ class Cardinal(MakefilePackage, CudaPackage, ROCmPackage):
         if sys.platform == "darwin":
             otool = which("otool", required=True)
             output = otool("-L", binary, output=str, error=str)
+            rpaths = None
             for line in output.splitlines()[1:]:
                 line = line.strip()
                 if not line:
                     continue
                 resolved = line.split(" (", 1)[0].strip()
+                if resolved.startswith(("@rpath/", "@loader_path/", "@executable_path/")):
+                    if rpaths is None:
+                        rpaths = self._macos_rpaths(binary)
+                    resolved = self._resolve_macos_dep(binary, resolved, rpaths)
                 deps.append((line, resolved))
         else:
             ldd = which("ldd", required=True)
@@ -635,6 +682,13 @@ class Cardinal(MakefilePackage, CudaPackage, ROCmPackage):
             bad = []
             for line, resolved in self._shared_lib_deps(binary):
                 if "libhdf5" not in os.path.basename(resolved):
+                    continue
+                if resolved.startswith("@"):
+                    # _resolve_macos_dep couldn't find this under any of the
+                    # binary's own LC_RPATH entries -- dyld would fail to
+                    # load it too, so this is a real problem, just not one
+                    # os.path.realpath can meaningfully report on.
+                    bad.append((line, "could not resolve via LC_RPATH"))
                     continue
                 resolved = os.path.realpath(resolved)
                 if not resolved.startswith(hdf5_prefix):
