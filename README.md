@@ -173,6 +173,36 @@ ways Cardinal tests itself:
 which is fetched during checkout either way); the default install is
 unaffected.
 
+## Developing this package
+
+`spack install` always builds in a fresh, per-hash stage directory, so
+any change to `package.py` -- even one that only touches `install()`,
+nothing to do with Cardinal's own source -- forces Cardinal's entire
+`build()` phase (NekRS, OCCA, MOOSE, everything) to redo from scratch.
+That's fine for a one-off install, but is a slow loop for iterating on
+this package itself.
+
+If you (a Cardinal developer) already have a local Cardinal checkout
+with its submodules initialized, `spack dev-build` builds in that
+persistent directory instead of a disposable stage, so unrelated `make`
+targets stay up to date between runs and only what actually needs to
+rebuild does:
+
+```console
+spack dev-build cardinal dev_path=/path/to/your/cardinal/checkout +nek +openmc
+```
+
+Notes:
+
+- `dev-build` does not clone Cardinal or fetch submodules for you --
+  `dev_path` must already have whatever submodules the variants you're
+  building need (see `submodules()` in `package.py` for the exact list
+  per variant).
+- Once you're done iterating, do a final plain `spack install cardinal`
+  from a fresh clone too, to confirm the normal end-user path (the one
+  everyone other than a Cardinal developer will actually use) still
+  works end to end.
+
 ## Cray / Slingshot systems
 
 By default, Spack will build its own generic `openmpi` to satisfy
