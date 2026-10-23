@@ -468,6 +468,26 @@ class Cardinal(MakefilePackage, CudaPackage, ROCmPackage):
                     return candidate
         return dep
 
+    def _fix_macos_install_names(self, files):
+        # Most Cardinal/MOOSE-built shared libraries record their own
+        # dependencies as "@rpath/libfoo.dylib", which resolves fine once
+        # prefix.lib (already on every installed binary's LC_RPATH) holds
+        # the copy made above -- but at least one (test/lib's
+        # libcardinal_test-opt) instead gets the linker's default install
+        # name, the literal absolute build-tree path, which breaks the
+        # moment the build stage is removed (confirmed by a real failure:
+        # "Library not loaded: /.../spack-stage-.../spack-src/test/lib/
+        # libcardinal_test-opt.0.dylib"). Rewrite every dependency still
+        # pointing into the stage -- on every installed binary and on the
+        # libraries just copied into prefix.lib, in case of inter-library
+        # dependencies -- to the @rpath form the properly-built libraries
+        # already use.
+        install_name_tool = which("install_name_tool", required=True)
+        for f in files:
+            for _line, resolved in self._shared_lib_deps(f):
+                if resolved.startswith(self.stage.source_path):
+                    install_name_tool("-change", resolved, f"@rpath/{os.path.basename(resolved)}", f)
+
     def _shared_lib_deps(self, binary):
         # macOS has no `ldd`; `otool -L` is Apple's equivalent, but with a
         # different output format (first line is the binary itself, each
@@ -522,7 +542,9 @@ class Cardinal(MakefilePackage, CudaPackage, ROCmPackage):
         # and copy those libraries into prefix.lib -- already on
         # cardinal-opt's RPATH (where CONTRIB_INSTALL_DIR=self.prefix put
         # NekRS/OpenMC/ADIOS2 during build()), so no RPATH surgery is
-        # needed.
+        # needed on Linux. On macOS some of these libraries' own Mach-O
+        # install names are stage-absolute paths rather than @rpath/...
+        # (see _fix_macos_install_names), which does need surgery.
         mkdirp(prefix.bin)
         mkdirp(prefix.lib)
 
@@ -546,13 +568,19 @@ class Cardinal(MakefilePackage, CudaPackage, ROCmPackage):
                 if resolved.startswith(self.stage.source_path):
                     lib_dirs.add(os.path.dirname(resolved))
 
+        copied_libs = []
         for lib_dir in lib_dirs:
             libs = glob.glob(join_path(lib_dir, "*.so*")) + glob.glob(join_path(lib_dir, "*.dylib"))
             if libs:
                 cp("-a", *libs, prefix.lib)
+                copied_libs.extend(join_path(prefix.lib, os.path.basename(lib)) for lib in libs)
 
         for binary in binaries:
             install(binary, prefix.bin)
+
+        if sys.platform == "darwin":
+            installed_binaries = [join_path(prefix.bin, os.path.basename(b)) for b in binaries]
+            self._fix_macos_install_names(installed_binaries + copied_libs)
 
         # MOOSE also expects certain modules' "data" directories at
         # PREFIX/share/<name>/data (Registry.C's determineDataFilePath(),
