@@ -45,7 +45,20 @@ class Cardinal(MakefilePackage, CudaPackage, ROCmPackage):
 
     # Cardinal has no tagged releases in active use; devel is the branch
     # the project actually develops and tests against.
-    version("devel", branch="devel", submodules=submodules, get_full_repo=False)
+    #
+    # no_cache=True: submodules=submodules is a *callable* -- which
+    # submodules get checked out depends on package.spec (+openmc/+nek/
+    # +dagmc/...), so the same resolved commit can legitimately produce
+    # different checked-out content depending on which variants are
+    # active. Spack's git source-cache keys its cached archive only by
+    # commit, with no way to account for that, so without no_cache=True
+    # an earlier build with one variant combination can silently poison
+    # the cache for a later build of the same commit needing more
+    # submodules (confirmed by a real failure: a cached archive from a
+    # ~openmc build got reused for a later +openmc build, which then
+    # failed with "OpenMC does not seem to be available" despite
+    # submodules() correctly listing contrib/openmc).
+    version("devel", branch="devel", submodules=submodules, get_full_repo=False, no_cache=True)
 
     # libMesh's Autotools build links its legacy, bundled ExodusII sources
     # (contrib/exodusii/Lib), which predate the "partial I/O" API
