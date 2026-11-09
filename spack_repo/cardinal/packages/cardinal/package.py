@@ -4,7 +4,6 @@
 
 import glob
 import os
-import re
 import sys
 
 from spack_repo.builtin.build_systems.cuda import CudaPackage
@@ -178,6 +177,16 @@ class Cardinal(MakefilePackage, CudaPackage, ROCmPackage):
     # never adds cmake to the build DAG on its own. 3.21 matches NekRS's own
     # cmake_minimum_required().
     depends_on("cmake@3.21:", type="build")
+
+    # install() below runs the real MOOSE/Cardinal "make install" target,
+    # whose patch_rpath mechanism (framework/moose.mk) execs "patchelf"
+    # directly on Linux to repoint every installed binary/library's RPATH
+    # at the new install location -- not on PATH by default (confirmed by
+    # a real failure: "patchelf: command not found", every
+    # install_lib_from_archive_* recipe failing with Error 127). macOS
+    # uses install_name_tool instead (part of the Xcode command line
+    # tools, not something Spack needs to provide).
+    depends_on("patchelf", type="build", when="platform=linux")
 
     # OpenMC's own cmake/Modules/FindLIBMESH.cmake locates libMesh via
     # find_package(PkgConfig) + libMesh's own .pc file -- pkgconf/pkg-config
@@ -411,6 +420,20 @@ class Cardinal(MakefilePackage, CudaPackage, ROCmPackage):
             f"OCCA_HIP_ENABLED={'1' if spec.satisfies('+rocm') else '0'}",
         ]
 
+    def edit(self, spec, prefix):
+        # The standard MOOSE/Cardinal install mechanism (inherited from
+        # contrib/moose/framework/{app,moose}.mk -- see install() below)
+        # needs contrib/moose's own Autotools configure run first, to
+        # write conf_vars.mk and regenerate MooseConfig.h with the real
+        # install prefix. This must happen here, before anything is
+        # compiled: running configure against an already-built tree
+        # regenerates MooseConfig.h with a fresh timestamp and forces a
+        # full, unplanned recompile (every object file that #includes it
+        # looks stale).
+        with working_dir(join_path(self.stage.source_path, "contrib", "moose")):
+            configure = Executable("./configure")
+            configure(f"--prefix={prefix}")
+
     @run_before("build")
     def ensure_submodules(self):
         # submodules=submodules (see the version() directive above) is a
@@ -573,44 +596,23 @@ class Cardinal(MakefilePackage, CudaPackage, ROCmPackage):
                 deps.append((line.strip(), resolved))
         return deps
 
-    def install(self, spec, prefix):
-        # Cardinal has no `make install` target (OpenMC/NekRS/etc. are
-        # already in `prefix` via CONTRIB_INSTALL_DIR from build()), so
-        # cardinal-opt (and cardinal-dbg, under METHOD=dbg) just need
-        # copying over by hand.
-        #
-        # cardinal-opt is not self-contained: like every MOOSE-based app it
-        # dynamically links libmoose-opt.so, its own libcardinal-opt.so/
-        # libcardinal_test-opt.so, libhit-opt.so/libpcre-opt.so, and one
-        # shared library per enabled MOOSE module -- none of which
-        # Cardinal's Makefile installs anywhere; its RPATH points straight
-        # at the (temporary) build tree. Rather than hardcoding that list
-        # of build-tree subdirectories (fragile to the exact set of MOOSE
-        # modules Cardinal enables), find them the way the loader would:
-        # inspect the still-in-place build-tree binary's shared library
-        # dependencies (ldd on Linux, otool -L on macOS), collect the
-        # directories of every dependency that resolved inside the stage,
-        # and copy those libraries into prefix.lib -- already on
-        # cardinal-opt's RPATH (where CONTRIB_INSTALL_DIR=self.prefix put
-        # NekRS/OpenMC/ADIOS2 during build()), so no RPATH surgery is
-        # needed on Linux. On macOS some of these libraries' own Mach-O
-        # install names are stage-absolute paths rather than @rpath/...
-        # (see _fix_macos_install_names), which does need surgery.
+    def _install_unit_binary(self, binary, prefix):
+        # unit/'s own Makefile (APPLICATION_NAME := cardinal-unit) is a
+        # separate build from the main cardinal-opt app -- entirely
+        # outside the install_bin/install_all_libs/install_data mechanism
+        # "make install" below drives -- so it still needs the same
+        # ldd-based treatment the main binary used to get before it had a
+        # real install target: find directories of any shared library
+        # dependency still resolving inside the (temporary) build tree
+        # and copy those into prefix.lib (already on this binary's RPATH,
+        # same as cardinal-opt's, via CONTRIB_INSTALL_DIR=self.prefix from
+        # build()). In practice "make install" below will have already
+        # installed everything this binary also links against (the same
+        # MOOSE/Cardinal/module libraries), so this is mostly a defensive
+        # no-op; it only actually copies something if unit/ turns out to
+        # link an additional library of its own.
         mkdirp(prefix.bin)
         mkdirp(prefix.lib)
-
-        binaries = [join_path(self.stage.source_path, "cardinal-opt")]
-        dbg = join_path(self.stage.source_path, "cardinal-dbg")
-        if os.path.exists(dbg):
-            binaries.append(dbg)
-        # unit/'s own Makefile (APPLICATION_NAME := cardinal-unit) follows
-        # the same MOOSE METHOD-suffix convention as the main cardinal-opt
-        # build, so under the default METHOD=opt it links "cardinal-unit-opt",
-        # not the bare "cardinal-unit" -- confirmed directly in a real build
-        # log ("Linking Executable .../unit/cardinal-unit-opt").
-        unit_binary = join_path(self.stage.source_path, "unit", "cardinal-unit-opt")
-        if spec.satisfies("+tests") and os.path.exists(unit_binary):
-            binaries.append(unit_binary)
 
         # realpath'd because on macOS the stage lives under $TMPDIR, a
         # symlink (/var/folders/... -> /private/var/folders/...) -- Python
@@ -621,10 +623,9 @@ class Cardinal(MakefilePackage, CudaPackage, ROCmPackage):
 
         cp = which("cp", required=True)
         lib_dirs = set()
-        for binary in binaries:
-            for _line, resolved in self._shared_lib_deps(binary):
-                if os.path.realpath(resolved).startswith(stage_realpath):
-                    lib_dirs.add(os.path.dirname(resolved))
+        for _line, resolved in self._shared_lib_deps(binary):
+            if os.path.realpath(resolved).startswith(stage_realpath):
+                lib_dirs.add(os.path.dirname(resolved))
 
         copied_libs = []
         for lib_dir in lib_dirs:
@@ -633,41 +634,35 @@ class Cardinal(MakefilePackage, CudaPackage, ROCmPackage):
                 cp("-a", *libs, prefix.lib)
                 copied_libs.extend(join_path(prefix.lib, os.path.basename(lib)) for lib in libs)
 
-        for binary in binaries:
-            install(binary, prefix.bin)
+        install(binary, prefix.bin)
 
         if sys.platform == "darwin":
-            installed_binaries = [join_path(prefix.bin, os.path.basename(b)) for b in binaries]
-            self._fix_macos_install_names(installed_binaries + copied_libs, stage_realpath)
+            installed = join_path(prefix.bin, os.path.basename(binary))
+            self._fix_macos_install_names([installed] + copied_libs, stage_realpath)
 
-        # MOOSE also expects certain modules' "data" directories at
-        # PREFIX/share/<name>/data (Registry.C's determineDataFilePath(),
-        # which mooseErrors at startup if missing once the binary looks
-        # installed). Cardinal's Makefile never installs these. Rather
-        # than hardcoding the two current call sites
-        # (registerAppDataFilePath("moose") in framework/src/base/Moose.C,
-        # registerAppDataFilePath("solid_mechanics") in
-        # modules/solid_mechanics/src/base/SolidMechanicsApp.C), discover
-        # them the way MOOSE itself does: find every
-        # registerAppDataFilePath("name") call under contrib/moose and
-        # copy that call's sibling "../../data" directory, if present, to
-        # prefix/share/<name>/data.
-        register_re = re.compile(r'registerAppDataFilePath\("([a-z0-9_]+)"\)')
-        moose_dir = join_path(self.stage.source_path, "contrib", "moose")
-        for root, _dirs, files in os.walk(moose_dir):
-            for fname in files:
-                if not fname.endswith(".C"):
-                    continue
-                with open(join_path(root, fname), errors="ignore") as f:
-                    names = register_re.findall(f.read())
-                for name in names:
-                    data_dir = os.path.normpath(join_path(root, "..", "..", "data"))
-                    if os.path.isdir(data_dir):
-                        dest_dir = join_path(prefix.share, name)
-                        mkdirp(dest_dir)
-                        cp("-a", data_dir, dest_dir)
+    def install(self, spec, prefix):
+        # Like every MOOSE-based app, Cardinal inherits a real "install"
+        # target from contrib/moose/framework/{app,moose}.mk (see
+        # https://mooseframework.inl.gov/application_development/build_system.html#make-install),
+        # not something this package needs to hand-roll: it copies
+        # cardinal-opt (and cardinal-dbg, under METHOD=dbg) and every
+        # MOOSE/Cardinal/module shared library those binaries need into
+        # CONTRIB_INSTALL_DIR (already routed to this package's prefix by
+        # setup_build_environment), patches their RPATH (patchelf on
+        # Linux, install_name_tool on macOS) to point at the new
+        # location, and installs each enabled module's "data" directory
+        # plus Cardinal's own INSTALLABLE_DIRS test/tutorial inputs. The
+        # ENABLE_* flags must match build()'s exactly, or "make install"
+        # recomputes a dependency's cmake flags differently than what it
+        # was actually built with and triggers a real reconfigure attempt.
+        # MOOSE_SKIP_DOCS avoids a hard dependency on the large_media
+        # submodule, which this package doesn't fetch.
+        make(*self._make_flags(), "install", "MOOSE_SKIP_DOCS=1")
 
         if spec.satisfies("+tests"):
+            unit_binary = join_path(self.stage.source_path, "unit", "cardinal-unit-opt")
+            if os.path.exists(unit_binary):
+                self._install_unit_binary(unit_binary, prefix)
             # Stash everything `spack test run cardinal` needs once the
             # build stage is gone: the run_tests driver script, the
             # testroot file it walks upward to find (identifies the app
