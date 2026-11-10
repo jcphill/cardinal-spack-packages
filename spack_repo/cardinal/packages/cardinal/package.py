@@ -6,6 +6,7 @@ import glob
 import os
 import sys
 
+import spack.relocate
 from spack_repo.builtin.build_systems.cuda import CudaPackage
 from spack_repo.builtin.build_systems.makefile import MakefilePackage
 from spack_repo.builtin.build_systems.rocm import ROCmPackage
@@ -187,6 +188,20 @@ class Cardinal(MakefilePackage, CudaPackage, ROCmPackage):
     # uses install_name_tool instead (part of the Xcode command line
     # tools, not something Spack needs to provide).
     depends_on("patchelf", type="build", when="platform=linux")
+
+    # install()'s INSTALLABLE_DIRS copy (framework/scripts/
+    # install_copy_inputs.sh) excludes broken symlinks from its "rsync
+    # --copy-unsafe-links" call, but still relies on whatever bare "rsync"
+    # resolves to on PATH tolerating an in-tree-but-dangling symlink it
+    # didn't manage to exclude. Linux's system rsync (modern GNU rsync)
+    # does (confirmed: a synthetic dangling in-tree symlink copies fine,
+    # exit 0); macOS's bundled rsync is a 20-year-old 2.6.9 (frozen
+    # pre-GPLv3) that instead errors per-file trying to stat it, failing
+    # the whole transfer with exit 23 -- a real failure hit building
+    # Cardinal's tutorials (target_cardinal_tutorials: Error 23), not a
+    # logic bug in the script itself. Force a modern one onto PATH, same
+    # as patchelf above, but only where it's actually needed.
+    depends_on("rsync", type="build", when="platform=darwin")
 
     # OpenMC's own cmake/Modules/FindLIBMESH.cmake locates libMesh via
     # find_package(PkgConfig) + libMesh's own .pc file -- pkgconf/pkg-config
@@ -742,6 +757,62 @@ class Cardinal(MakefilePackage, CudaPackage, ROCmPackage):
             hip_prefix = self.spec["hip"].prefix
             env.prepend_path("PATH", hip_prefix.bin)
             env.prepend_path("LD_LIBRARY_PATH", hip_prefix.lib)
+
+    @run_after("install")
+    def resign_macos_binaries(self):
+        # install()'s "make install" patches every installed binary's and
+        # library's RPATH in place via install_name_tool (patch_rpath/
+        # patch_relink in framework/moose.mk and app.mk), which invalidates
+        # whatever ad-hoc signature the linker applied at build time -- the
+        # same issue _fix_macos_install_names above already works around
+        # for the separate unit binary. "make install" itself never
+        # re-signs anything, so the real failure isn't a build error at
+        # all: the install succeeds, but every binary and library it
+        # touched (cardinal-opt, nekrs-fp32, every installed .dylib, ...)
+        # is killed outright by the Apple Silicon kernel the moment it's
+        # run, with no diagnostic beyond "zsh: killed" (confirmed by a real
+        # failure). Rather than enumerate every location "make install"
+        # might have touched (bin/, lib/, NekRS's own CMake install under
+        # udf/, 3rd_party/, ...), walk the whole prefix and re-sign every
+        # real Mach-O file found.
+        if sys.platform != "darwin":
+            return
+
+        # MakefileBuilder (builtin/build_systems/makefile.py) itself
+        # registers spack.relocate.fixup_macos_rpaths as its own
+        # run_after("install", when="platform=darwin") hook, to drop
+        # nonexistent/duplicate rpaths (here: a stale "lib64" entry that
+        # doesn't exist in Cardinal's actual lib/ layout) -- which also
+        # uses install_name_tool, also never re-signs, and (confirmed by a
+        # real failure) runs *after* every hook defined on this class,
+        # silently re-invalidating every signature just restored below.
+        # Run it ourselves first, so our own codesign pass below is the
+        # last thing to touch these files; Spack's own later automatic
+        # re-run of this identical function then finds nothing left to
+        # patch and is a no-op.
+        spack.relocate.fixup_macos_rpaths(self.spec)
+
+        macho_magics = {
+            b"\xfe\xed\xfa\xce",
+            b"\xce\xfa\xed\xfe",
+            b"\xfe\xed\xfa\xcf",
+            b"\xcf\xfa\xed\xfe",
+            b"\xca\xfe\xba\xbe",
+            b"\xbe\xba\xfe\xca",
+        }
+        codesign = which("codesign", required=True)
+        for root, _dirs, files in os.walk(self.prefix):
+            for name in files:
+                path = join_path(root, name)
+                if os.path.islink(path):
+                    continue
+                try:
+                    with open(path, "rb") as f:
+                        magic = f.read(4)
+                except OSError:
+                    continue
+                if magic in macho_magics:
+                    codesign("--force", "--sign", "-", path)
 
     @run_after("install")
     def check_single_hdf5(self):
